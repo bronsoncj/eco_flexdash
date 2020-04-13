@@ -1,0 +1,449 @@
+---
+title: "Eco Benefits: Buffalo, New York"
+runtime : shiny
+output: 
+  flexdashboard::flex_dashboard:
+  orientation: columns
+  fill : vertical
+---
+  
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(dplyr)
+library(scales)
+library(plotly)
+library(shiny)
+library(readr)  
+library(reshape2)
+library(data.table)
+library(shinyjs)
+library(highcharter)
+library(treemap)
+library(viridisLite)
+```
+
+
+```{r global}
+# csv has col_types argument. The string that follows col_types = " " MUST be as listed in order
+# to do any math.
+# better QUERYING from REST API may solve slow loadup time for outputs
+itreebenefits_site_data_csv_version <- read_csv("itreebenefits_site_data_csv_version.csv",col_types = "cccdnndnnnnddnnnniccccccddddc")
+
+#fread method..no difference with read_csv in this case.
+#itreebenefits_site_data_csv_version <- fread("C:/Users/cbron/OneDrive/Documents/Work/Eco Benefits Dash/itreebenefits_site_data_csv_version.csv", colClasses = c("character", "character", "character",
+#"double", "numeric", "numeric", "double", "numeric", "numeric", "numeric", "numeric", "double", "double",
+#"numeric", "numeric", "numeric", "numeric", "integer", "character", "character", "character", "character", "character", "character", "double", "double", "double", "double", "character"))
+
+itree <- itreebenefits_site_data_csv_version %>% arrange(Street)
+no_vacant <- subset(itreebenefits_site_data_csv_version, Botanical != "VACANT" & `Council District` != "0" & Street != "*Calls" & Botanical != "448" & Botanical != "0")
+
+
+council_savings <- no_vacant %>%
+  group_by(`Council District`) %>%
+  summarise(`Air Quality Savings` = sum(`Air Quality Benefits`), 
+            `Energy Savings` = sum(`Energy Benefits`),
+            `Greenhouse CO2 Savings` = sum(`Greenhouse CO2 Benefits`),
+            `Property Savings` = sum(`Property Benefits`),
+            `Water Savings` = sum(`Stormwater Benefits`))
+
+
+council_sm_melt <- melt(council_savings, id.vars = "Council District")
+council_melt_group <- council_sm_melt %>% group_by(`Council District`, variable) %>% summarise(sum = sum(value))
+
+# TREEPLOT ---------------------------
+classified_dbh <- no_vacant %>% mutate(`DBH Class` = case_when(DBH >= 1 & DBH <= 6 ~"1-6",
+                                                               DBH >= 7 & DBH <= 12 ~"7-12",
+                                                               DBH >= 13 & DBH <= 18 ~"13-18",
+                                                               DBH >= 19 & DBH <= 24 ~"19-24",
+                                                               DBH >= 25 & DBH <= 30 ~"25-30",
+                                                               DBH >= 31 & DBH <= 36 ~"31-36",
+                                                               DBH >= 37 & DBH <= 12 ~"37-42",
+                                                               DBH >= 43 & DBH <= 48 ~"43-48",
+                                                               DBH >= 49 & DBH <= 59 ~"49-59",
+                                                               DBH >= 60 & DBH <= 69 ~"60-69",
+                                                               DBH >= 70 & DBH <= 79 ~"70-79",
+                                                               DBH >= 80 & DBH <= 89 ~"80-89",
+                                                               DBH >= 90 & DBH <= 99 ~"90-99"))
+
+# SAVINGS BAR----------------------
+council_savings <- no_vacant %>%
+  group_by(`Council District`) %>%
+  summarise(`Air Quality` = sum(`Air Quality Benefits`), 
+            `Energy` = sum(`Energy Benefits`),
+            `Greenhouse Gas` = sum(`Greenhouse CO2 Benefits`),
+            `Property` = sum(`Property Benefits`),
+            `Stormwater` = sum(`Stormwater Benefits`))
+
+council_sm_melt <- melt(council_savings, id.vars = "Council District")
+
+renamed <- council_sm_melt %>%
+  rename(`Benefit Type` = variable,
+         `Savings Total` = value)
+
+council_melt_group <- renamed %>%
+  group_by(`Council District`, `Benefit Type`) %>%
+  summarise(Savings = sum(`Savings Total`))
+
+usd <- function(x){
+  return(paste("$", formatC(as.numeric(x), format = "f", digits = 2, big.mark = ",")))
+}
+```
+
+
+Column {data-width=100}
+-----------------------------------------------------------------------
+  
+```{r}
+renderUI({
+  
+  checkboxGroupInput("district", "Select District",
+                     choices = c("DELAWARE", "ELLICOTT", "LOVEJOY", "MASTEN", "NIAGARA", "NORTH", "UNIVERSITY"),
+                     selected = "DELAWARE",
+                     inline = TRUE)
+  #c("DELAWARE", "ELLICOTT", "LOVEJOY", "MASTEN", "NIAGARA", "NORTH", "UNIVERSITY")
+  # no_vacant$`Council District`,
+})
+
+```
+
+
+```{r}
+renderUI({
+  selection_made <- no_vacant[no_vacant$`Council District` == input$district, "Street"]
+  selectInput("count_or_value", "Filter by:",
+              choices = c("Number of Trees", "Yearly Eco Benefit Value"),
+              selected = "Number of Trees",
+              multiple = FALSE)
+  
+})
+```
+
+
+```{r}
+renderUI({
+  
+  dist_choice <- council_melt_group[council_melt_group$`Council District` == input$district, "Benefit Type"]
+  
+  selectInput("eco_bens", "Select Eco Benefit",
+              choices = unique(dist_choice),
+              selected = unique(dist_choice[1]),
+              multiple = FALSE)
+  
+})
+# do some scales work to change how many decimals are showing...
+# add in comparable gauges..
+```
+
+### dist aggr count
+
+```{r}
+# try width parameter...width = 10
+renderValueBox({
+  
+  
+  dist_total_trees <- no_vacant %>%
+    filter(`Council District` %in% input$district) %>%
+    summarise(`Tree Count` = sum(n()))
+  # fix so it doesn't concatenation to user. May need to write a function to handle that.
+  text_for_vb <- list(input$district)
+  
+  valueBox(text_for_vb, value = dist_total_trees$`Tree Count`, icon = "fas fa-building", color = "lime")
+  
+})
+
+```
+
+### BLOCK WITH VALUEBOX
+
+```{r}
+output$sub_click <- renderPrint({
+  sub_click <- event_data(event = "plotly_click", source = "district_src")
+  
+  if (is.null(sub_click)) {
+    cat("No tree selected")
+  }
+  
+  if (!is.null(sub_click)) {
+    label_sub <- data.frame(
+      x = sub_click[["x"]],
+      y = sub_click[["y"]],
+      label = sub_click[["key"]])
+    
+    print(label_sub[1,3])
+  }
+})
+renderValueBox({
+  
+  valueBox(value = textOutput("sub_click"), caption = "Tree type", icon = "fas fa-road", color = "aqua")
+})
+
+```
+
+### Number of Trees click
+
+```{r}
+output$clicked <- renderPrint({
+  
+  clicked_data <- event_data(event = "plotly_click", source = "district_src")
+  
+  if (is.null(clicked_data)) {
+    cat("-")
+    
+  }
+  
+  #if (!is.null(clicked_data)) {
+  # cat(clicked_data[, c(3)])
+  #}
+  
+  if (!is.null(clicked_data)) {
+    label_data <- data.frame(
+      x = clicked_data[["x"]],
+      y = clicked_data[["y"]],
+      label = clicked_data[["key"]])
+    cat(label_data[,1])
+  }
+})
+
+output$sub_click <- renderPrint({
+  sub_click <- event_data(event = "plotly_click", source = "district_src")
+  
+  if (is.null(sub_click)) {
+    cat("No tree selected")
+  }
+  
+  if (!is.null(sub_click)) {
+    label_sub <- data.frame(x = sub_click[["x"]],
+                            y = sub_click[["y"]],
+                            label = sub_click[["key"]])
+    
+    cat(label_sub[1,3])
+  }
+})
+
+renderValueBox({
+  
+  valueBox(value = textOutput("clicked"), caption = "Count / Value (will be changed to match selection of viz.", icon = "fas fa-tree", color = "tan")
+})
+```
+
+### Street vb
+
+```{r}
+# works
+
+#output$click_eco_bens <- renderPrint({
+
+# click_eco_bens = event_data(event = "plotly_click", source = "street_source")
+#require(click_eco_bens)
+#data.frame(click_eco_bens)
+
+#     if (!is.null(click_eco_bens)) {
+#     print(click_eco_bens[click_eco_bens$key, ])
+#  }
+
+#})
+
+renderGauge({
+  
+  #output$click_eco_bens <- renderPrint({
+  
+  #click_eco_bens = event_data(event = "plotly_click", source = "street_source")
+  
+  #     if (!is.null(clicked_data)) {
+  #    cat(clicked_data[, c(3)])
+  # }
+  
+  #})
+  
+  benefit_avg_filter <- council_sm_melt %>%
+    group_by(`Council District`) %>%
+    filter(value == input$eco_bens) %>%
+    summarise(`Benefit Average` = mean(n())) %>%
+    select(`Benefit Average`)
+  
+  council_melt_group <- council_sm_melt %>%
+    filter(variable %in% input$eco_bens, `Council District` %in% input$district) %>%
+    summarise(`Benefit Sum` = sum(value))
+  
+  
+  
+  
+  gauge(council_melt_group$`Benefit Sum`, min = 0, max = 1000000, symbol = "$",
+        gaugeSectors(
+          success = c(500000, 10000000),
+          warning = c(100000, 499999),
+          danger = c(0, 99999)
+        ))
+  
+})
+
+#renderValueBox({
+#valueBox(input$district, value = gaugeOutput("gauge_"), icon = "fas fa-money-bill-wave", color = "green")
+#})
+```
+
+Column
+-----------------------------------------------------------------------
+  
+### Council District's
+  
+```{r}
+n_trees_output <- reactive({
+  council_dist <- no_vacant %>%
+    filter(`Council District` %in% input$district) %>%
+    group_by(Common) %>%
+    summarize(`Number of Trees` = n(),
+              `Annual Eco Benefit` = sum(`Total Yearly Eco Benefits`)) %>%
+    top_n(40)
+  
+  select_visual <- council_dist %>%
+    filter(`Number of Trees` == input$count_or_value, `Annual Eco Benefit` == input$count_or_value)
+  
+  key = row.names(council_dist)
+  
+  # changing tooltip inputs is done @ t_lab_1 $ t_lab_2, then wrapped in at plotly @ the final line.
+  plt_1 <- ggplot(council_dist, mapping = aes(x = reorder(Common, +`Number of Trees`), y = `Number of Trees`,
+                                              t_lab_1 = Common,
+                                              t_lab_2 = `Number of Trees`,
+                                              key = Common)) +
+    geom_bar(stat = "identity", color = "dark green", fill = "#A4C988") +
+    coord_flip() +
+    ggtitle("Top 40 Trees by District (Count), Buffalo NY") +
+    labs(x = "Tree Name", y = "Count") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    theme_minimal() +
+    theme(panel.grid.major.y = element_blank())
+  
+  ggplotly(plt_1, source = "district_src", tooltip = c("t_lab_1", "t_lab_2"))
+})
+
+eco_value_output <- reactive({
+  
+  council_dist <- no_vacant %>%
+    filter(`Council District` %in% input$district) %>%
+    group_by(Common) %>%
+    summarize(`Annual Eco Benefit` = sum(`Total Yearly Eco Benefits`)) %>%
+    top_n(40)
+  
+  key = row.names(council_dist)
+  
+  # changing tooltip inputs is done @ t_lab_1 $ t_lab_2, then wrapped in at plotly @ the final line.
+  plt_2 <- ggplot(council_dist, mapping = aes(x = reorder(Common, +`Annual Eco Benefit`), y = `Annual Eco Benefit`,
+                                              t_lab_1 = Common,
+                                              t_lab_2 = usd(`Annual Eco Benefit`),
+                                              key = Common)) +
+    geom_bar(stat = "identity", color = "dark green", fill = "#A4C988") +
+    coord_flip() +
+    ggtitle("Top 40 Trees by District (Eco Value), Buffalo NY") +
+    labs(x = "Tree Name", y = "Eco Value") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    theme_minimal() +
+    scale_y_continuous(label = dollar_format(accuracy = 1, scale = 1, prefix = "$", big.mark = ",")) +
+    theme(panel.grid.major.y = element_blank())
+  
+  ggplotly(plt_2, source = "district_src", tooltip = c("t_lab_1", "t_lab_2"))
+  
+  
+})
+
+visual_choice <- reactive({
+  switch(input$count_or_value,
+         "Number of Trees" = n_trees_output(),
+         "Yearly Eco Benefit Value" = eco_value_output())
+  
+})
+
+renderPlotly({
+  visual_choice()
+})
+```
+
+Column
+-----------------------------------------------------------------------
+  
+### Savings Bar
+  
+```{r}
+#renderPlotly({
+  
+ # council_melt_group <- renamed %>%
+  #  filter(`Council District` %in% input$district) %>%
+   # group_by(`Benefit Type`) %>%
+    #summarise(Savings = sum(`Savings Total`))
+  
+  #svgs_plt <- ggplot(council_melt_group, mapping = aes(x = `Benefit Type`, y = Savings,
+                                                       #label_1 = `Benefit Type`,
+                                                       #label_2 = usd(Savings))) +
+  #  geom_bar(stat = "identity", color = "dark green", fill = "#A4C988") +
+  #  ggtitle("Savings by District, Buffalo NY") +
+  #  labs(x = "Benefit Type", y = "Savings") +
+  #  theme_minimal() +
+  #  theme(plot.title = element_text(hjust = 0.5)) +
+  #  theme(panel.grid.major.x = element_blank()) +
+  #  scale_y_continuous(labels = dollar_format(accuracy = 1, scale = 1,
+  #                                            prefix = "$", big.mark = ","))
+  
+  #ggplotly(svgs_plt, tooltip = c("label_1", "label_2"))
+#})
+
+renderHighchart({
+  council_melt_group <- renamed %>%
+    filter(`Council District` %in% input$district) %>%
+    group_by(`Benefit Type`) %>%
+    summarise(Savings = sum(`Savings Total`)) %>%
+    arrange(desc(Savings))
+  
+
+# need to format axes  
+  highchart() %>%
+    hc_chart(type = "column", zoomType = "xy") %>%
+    hc_title(text = "Savings Amount per Benefit Type") %>%
+    hc_xAxis(categories = council_melt_group$`Benefit Type`) %>%
+    hc_add_series(name = "Savings", data = council_melt_group$Savings, dataLabels = list(enabled = TRUE, format = '${point.y}')) %>%
+    hc_colors(colors = "#A4C988")
+    
+  
+  
+})
+
+```
+
+### Treemap
+
+```{r}
+# input$click to redraw each time? based on trees on plots...
+renderHighchart({
+  
+  dbh_by_council <- classified_dbh %>%
+    filter(`Council District` %in% input$district) %>%
+    group_by(`DBH Class`) %>%
+    summarise(`DBH Class Total` = sum(n()))
+  
+  
+  
+#  fig <- plot_ly(dbh_by_council,
+ #                type='treemap',
+  #               name="test",
+   #              labels=dbh_by_council$`DBH Class`,
+    #             parents=NA,
+     #            values=dbh_by_council$`DBH Class Total`,
+      #           textinfo = "label+value+percent",
+       #          maxdepth=1)
+  
+  #fig
+#})
+
+treemap <- treemap(dbh_by_council,
+                   index = "DBH Class",
+                   vSize = "DBH Class Total",
+                   vColor = "DBH Class Total",
+                   type = "value",
+                   palette = rainbow(9))
+
+
+
+hctreemap(treemap, allowDrillToNode = TRUE,
+                       layoutAlgorithm = "squarified")
+})
+
+```
